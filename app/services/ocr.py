@@ -31,8 +31,11 @@ class OCRService:
         processor_id = os.getenv('DOCUMENT_AI_PROCESSOR_ID')
         project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
 
+        # Configuration explicite de l'endpoint européen
+        client_options = {"api_endpoint": "eu-documentai.googleapis.com"}
+        self.documentai_client = documentai.DocumentProcessorServiceClient(client_options=client_options)
+        
         self.processor_name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
-        self.documentai_client = documentai.DocumentProcessorServiceClient()
 
     async def process_document(self, content: bytes, filename: str) -> Dict[str, Any]:
         try:
