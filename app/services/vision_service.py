@@ -1,16 +1,21 @@
 from google.cloud import vision_v1
 from loguru import logger
-from pdf2image import convert_from_bytes
 from typing import Dict, Any
-import io
 import asyncio
+from pdf2image import convert_from_bytes
+from io import BytesIO
 import traceback
 import time
 
 class VisionService:
     def __init__(self, credentials=None):
         try:
-            self.client = vision_v1.ImageAnnotatorClient(credentials=credentials)
+            # Configuration de l'endpoint régional
+            client_options = {"api_endpoint": "eu-vision.googleapis.com"}
+            self.client = vision_v1.ImageAnnotatorClient(
+                client_options=client_options,
+                credentials=credentials
+            )
             logger.info("Vision AI client initialized successfully")
         except Exception as e:
             logger.error(f"Failed to initialize Vision AI client: {str(e)}\n{traceback.format_exc()}")
@@ -23,79 +28,47 @@ class VisionService:
             if filename.lower().endswith('.pdf'):
                 logger.info(f"Starting PDF conversion for Vision AI: {filename}")
                 try:
-                    images = await asyncio.to_thread(convert_from_bytes, content)
+                    images = convert_from_bytes(content)
+                    if not images:
+                        raise ValueError("Failed to convert PDF to image")
                     logger.info(f"Successfully converted PDF to {len(images)} images")
-                    image_bytes = await asyncio.to_thread(self._pil_to_bytes, images[0])
+                    
+                    # Use first page for analysis
+                    img_byte_arr = BytesIO()
+                    images[0].save(img_byte_arr, format='PNG')
+                    image_content = img_byte_arr.getvalue()
                     logger.info("First page converted to bytes successfully")
                 except Exception as e:
                     logger.error(f"PDF conversion failed: {str(e)}\n{traceback.format_exc()}")
                     raise
             else:
-                image_bytes = content
+                image_content = content
 
             # Configure features
             logger.info("Configuring Vision AI features")
             features = [
                 vision_v1.Feature(type_=vision_v1.Feature.Type.DOCUMENT_TEXT_DETECTION),
                 vision_v1.Feature(type_=vision_v1.Feature.Type.LABEL_DETECTION),
-                vision_v1.Feature(type_=vision_v1.Feature.Type.OBJECT_LOCALIZATION)
+                vision_v1.Feature(type_=vision_v1.Feature.Type.TEXT_DETECTION)
             ]
 
-            # Create and process request
+            # Create request
             logger.info("Creating Vision AI request")
-            image = vision_v1.Image(content=image_bytes)
-            request = vision_v1.AnnotateImageRequest(image=image, features=features)
+            image = vision_v1.Image(content=image_content)
+            request = vision_v1.AnnotateImageRequest(
+                image=image,
+                features=features
+            )
 
+            # Process asynchronously
             logger.info("Sending request to Vision AI")
-            response = await self._execute_request(request)
-            logger.info("Received Vision AI response")
-
-            result = self._process_response(response, filename)
-            
-            processing_time = time.time() - start_time
-            logger.info(f"Vision AI processing completed in {processing_time:.2f} seconds")
-            
-            return result
-
-        except Exception as e:
-            logger.error(f"Error in Vision AI processing: {str(e)}\n{traceback.format_exc()}")
-            raise
-
-    def _pil_to_bytes(self, image) -> bytes:
-        """Convert PIL image to bytes"""
-        logger.info("Converting PIL image to bytes")
-        try:
-            img_byte_arr = io.BytesIO()
-            image.save(img_byte_arr, format='PNG')
-            logger.info("Image conversion successful")
-            return img_byte_arr.getvalue()
-        except Exception as e:
-            logger.error(f"Error converting image to bytes: {str(e)}\n{traceback.format_exc()}")
-            raise
-
-    async def _execute_request(self, request: vision_v1.AnnotateImageRequest) -> vision_v1.AnnotateImageResponse:
-        """Execute Vision AI request"""
-        try:
-            logger.info("Starting Vision AI API call")
-            start_time = time.time()
-            
             response = await asyncio.to_thread(
                 self.client.annotate_image,
-                request
+                request=request
             )
-            
-            processing_time = time.time() - start_time
-            logger.info(f"Vision AI API call completed in {processing_time:.2f} seconds")
-            return response
-            
-        except Exception as e:
-            logger.error(f"Vision AI API call failed: {str(e)}\n{traceback.format_exc()}")
-            raise
+            logger.info("Received Vision AI response")
 
-    def _process_response(self, response: vision_v1.AnnotateImageResponse, filename: str) -> Dict[str, Any]:
-        """Process Vision AI response"""
-        logger.info("Processing Vision AI response")
-        try:
+            # Process response
             result = {
                 'text': '',
                 'labels': [],
@@ -103,14 +76,10 @@ class VisionService:
                     'document_type': 'unknown',
                     'language': None,
                     'confidence': 0.0
-                },
-                'visual_elements': {
-                    'objects': [],
-                    'tables': []
                 }
             }
 
-            # Process text annotations
+            # Extract document text if available
             if response.full_text_annotation:
                 logger.info("Processing text annotations")
                 result['text'] = response.full_text_annotation.text
@@ -120,35 +89,30 @@ class VisionService:
                 if response.full_text_annotation.pages:
                     result['metadata']['confidence'] = response.full_text_annotation.pages[0].confidence
                     logger.info(f"Text detection confidence: {result['metadata']['confidence']:.2%}")
+                
+                # Try to detect document type from labels
+                for label in response.label_annotations:
+                    result['labels'].append({
+                        'description': label.description,
+                        'score': label.score,
+                        'topicality': label.topicality
+                    })
+                    if label.score > 0.8:  # High confidence label
+                        if any(keyword in label.description.lower() for keyword in 
+                              ['schematic', 'diagram', 'technical', 'drawing']):
+                            result['metadata']['document_type'] = 'technical_drawing'
 
-            # Process labels
-            if response.label_annotations:
-                logger.info("Processing label annotations")
-                result['labels'] = [{
-                    'description': label.description,
-                    'score': round(label.score, 4),
-                    'topicality': round(label.topicality, 4)
-                } for label in response.label_annotations]
-                logger.info(f"Found {len(result['labels'])} labels")
+            # Detect language if available
+            if response.text_annotations and response.text_annotations[0].locale:
+                result['metadata']['language'] = response.text_annotations[0].locale
+                logger.info(f"Detected language: {result['metadata']['language']}")
 
-            # Process detected objects
-            if response.localized_object_annotations:
-                logger.info("Processing object detections")
-                result['visual_elements']['objects'] = [{
-                    'name': obj.name,
-                    'confidence': round(obj.score, 4),
-                    'bounding_box': {
-                        'left': obj.bounding_poly.normalized_vertices[0].x,
-                        'top': obj.bounding_poly.normalized_vertices[0].y,
-                        'right': obj.bounding_poly.normalized_vertices[2].x,
-                        'bottom': obj.bounding_poly.normalized_vertices[2].y
-                    }
-                } for obj in response.localized_object_annotations]
-                logger.info(f"Found {len(result['visual_elements']['objects'])} objects")
-
-            logger.info("Vision AI response processing completed")
+            processing_time = time.time() - start_time
+            logger.info(f"Vision AI processing completed in {processing_time:.2f} seconds")
+            
             return result
 
         except Exception as e:
-            logger.error(f"Error processing Vision AI response: {str(e)}\n{traceback.format_exc()}")
+            error_msg = f"Error in Vision AI processing: {str(e)}\n{traceback.format_exc()}"
+            logger.error(error_msg)
             raise
