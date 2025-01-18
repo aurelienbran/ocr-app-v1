@@ -8,7 +8,7 @@ import gc
 import io
 import tempfile
 import psutil
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, AsyncGenerator
 from PyPDF2 import PdfReader, PdfWriter
 
 from app.services.vision_service import VisionService
@@ -114,28 +114,41 @@ class OCRService:
         """Assure le nettoyage à la destruction"""
         self._cleanup()
 
-    def _memory_efficient_chunk_generator(self, pdf_content: bytes):
+    async def _memory_efficient_chunk_generator(self, pdf_content: bytes) -> AsyncGenerator[bytes, None]:
         """
-        Générateur de chunks PDF avec gestion dynamique
+        Générateur ASYNCHRONE de chunks PDF avec gestion dynamique
         
         :param pdf_content: Contenu du PDF à traiter
         :yield: Chunks du PDF
         """
-        reader = PdfReader(io.BytesIO(pdf_content))
+        # Utiliser un thread pour éviter de bloquer l'event loop
+        reader = await asyncio.to_thread(PdfReader, io.BytesIO(pdf_content))
         total_pages = len(reader.pages)
         
         for start in range(0, total_pages, self.chunk_pages):
-            writer = PdfWriter()
+            # Utiliser un thread pour la création de chunks
+            writer = await asyncio.to_thread(PdfWriter)
             end = min(start + self.chunk_pages, total_pages)
             
             for page_num in range(start, end):
-                writer.add_page(reader.pages[page_num])
+                await asyncio.to_thread(writer.add_page, reader.pages[page_num])
             
-            chunk_buffer = io.BytesIO()
-            writer.write(chunk_buffer)
-            chunk_buffer.seek(0)
+            # Écriture et lecture du chunk de manière asynchrone
+            chunk_buffer = await asyncio.to_thread(self._write_chunk, writer)
             
-            yield chunk_buffer.read()
+            yield chunk_buffer
+
+    def _write_chunk(self, writer: PdfWriter) -> bytes:
+        """
+        Écrit un chunk PDF et retourne son contenu
+        
+        :param writer: Objet PdfWriter
+        :return: Contenu du chunk en bytes
+        """
+        chunk_buffer = io.BytesIO()
+        writer.write(chunk_buffer)
+        chunk_buffer.seek(0)
+        return chunk_buffer.read()
 
     async def _process_chunk_with_timeout(self, chunk_path: str, chunk_index: int) -> Optional[Dict[str, Any]]:
         """
@@ -269,6 +282,7 @@ class OCRService:
             processed_results = []
             chunks_processed = 0
             
+            # Utiliser l'async generator correctement
             async for chunk in self._memory_efficient_chunk_generator(content):
                 # Vérification de la mémoire avant chaque traitement
                 if not self.memory_monitor.is_memory_safe():
