@@ -8,7 +8,7 @@ import gc
 import io
 import tempfile
 import psutil
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from PyPDF2 import PdfReader, PdfWriter
 
 from app.services.vision_service import VisionService
@@ -30,14 +30,23 @@ class MemoryMonitor:
         :return: Booléen indiquant si la mémoire est dans les limites
         """
         mem = psutil.virtual_memory()
-        return mem.percent < (self.max_memory_percent * 100)
+        current_usage = mem.percent
+        is_safe = current_usage < (self.max_memory_percent * 100)
+        
+        if not is_safe:
+            logger.warning(f"Memory pressure detected: {current_usage}% used")
+        
+        return is_safe
 
 class OCRService:
     def __init__(
         self, 
         max_chunk_size_mb: int = 10, 
         max_text_size: int = 500_000, 
-        max_memory_percent: float = 0.8
+        max_memory_percent: float = 0.8,
+        chunk_pages: int = 15,
+        processing_timeout: int = 600,
+        max_retries: int = 3
     ):
         """
         Service de traitement OCR avec gestion mémoire avancée
@@ -45,6 +54,9 @@ class OCRService:
         :param max_chunk_size_mb: Taille maximale des chunks PDF
         :param max_text_size: Taille maximale du texte fusionné
         :param max_memory_percent: Seuil maximal d'utilisation mémoire
+        :param chunk_pages: Nombre de pages par chunk
+        :param processing_timeout: Timeout pour le traitement d'un chunk
+        :param max_retries: Nombre maximal de tentatives par chunk
         """
         self._validate_and_setup_env_variables()
         self._initialize_clients()
@@ -54,10 +66,13 @@ class OCRService:
         
         self.max_chunk_size = max_chunk_size_mb * 1024 * 1024
         self.max_text_size = max_text_size
+        self.chunk_pages = chunk_pages
+        self.processing_timeout = processing_timeout
+        self.max_retries = max_retries
+        
         self.memory_monitor = MemoryMonitor(max_memory_percent)
         
         self.temp_dir = tempfile.mkdtemp(prefix='ocr_processing_')
-        self.processing_timeout = 600  # 10 minutes
 
     def _validate_and_setup_env_variables(self):
         """Validation des variables d'environnement requises"""
@@ -109,9 +124,9 @@ class OCRService:
         reader = PdfReader(io.BytesIO(pdf_content))
         total_pages = len(reader.pages)
         
-        for start in range(0, total_pages, 15):
+        for start in range(0, total_pages, self.chunk_pages):
             writer = PdfWriter()
-            end = min(start + 15, total_pages)
+            end = min(start + self.chunk_pages, total_pages)
             
             for page_num in range(start, end):
                 writer.add_page(reader.pages[page_num])
@@ -122,25 +137,37 @@ class OCRService:
             
             yield chunk_buffer.read()
 
-    async def _process_chunk_with_timeout(self, chunk_path: str, chunk_index: int) -> Dict[str, Any]:
+    async def _process_chunk_with_timeout(self, chunk_path: str, chunk_index: int) -> Optional[Dict[str, Any]]:
         """
-        Traitement d'un chunk avec timeout
+        Traitement d'un chunk avec timeout et retry
         
         :param chunk_path: Chemin du fichier chunk
         :param chunk_index: Index du chunk
         :return: Résultat du traitement ou None
         """
-        try:
-            return await asyncio.wait_for(
-                self._process_with_documentai(chunk_path),
-                timeout=self.processing_timeout
-            )
-        except asyncio.TimeoutError:
-            logger.warning(f"Chunk {chunk_index} processing timed out")
-            return None
-        except Exception as e:
-            logger.error(f"Chunk {chunk_index} processing error: {e}")
-            return None
+        for attempt in range(self.max_retries):
+            try:
+                result = await asyncio.wait_for(
+                    self._process_with_documentai(chunk_path),
+                    timeout=self.processing_timeout
+                )
+                return result
+            
+            except asyncio.TimeoutError:
+                logger.warning(
+                    f"Chunk {chunk_index} processing timed out "
+                    f"(Attempt {attempt + 1}/{self.max_retries})"
+                )
+                if attempt == self.max_retries - 1:
+                    return None
+            
+            except Exception as e:
+                logger.error(f"Chunk {chunk_index} processing error: {e}")
+                if attempt == self.max_retries - 1:
+                    return None
+                
+                # Délai entre les tentatives
+                await asyncio.sleep(2 ** attempt)
 
     async def _process_with_documentai(self, chunk_path: str) -> Dict[str, Any]:
         """
@@ -233,10 +260,14 @@ class OCRService:
         """
         start_time = time.time()
         try:
-            logger.info(f"Starting processing for {filename}")
+            logger.info(
+                f"Starting processing for {filename}, "
+                f"Initial memory usage: {psutil.virtual_memory().percent}%"
+            )
 
             # Liste pour résultats avec limitation
             processed_results = []
+            chunks_processed = 0
             
             async for chunk in self._memory_efficient_chunk_generator(content):
                 # Vérification de la mémoire avant chaque traitement
@@ -245,15 +276,17 @@ class OCRService:
                     await asyncio.sleep(5)  # Pause pour libération
                 
                 # Sauvegarde temporaire du chunk
-                chunk_path = os.path.join(self.temp_dir, f'chunk_{len(processed_results)}.pdf')
+                chunk_path = os.path.join(self.temp_dir, f'chunk_{chunks_processed}.pdf')
                 with open(chunk_path, 'wb') as f:
                     f.write(chunk)
 
                 try:
                     # Traitement du chunk
-                    chunk_result = await self._process_chunk_with_timeout(chunk_path, len(processed_results) + 1)
+                    chunk_result = await self._process_chunk_with_timeout(chunk_path, chunks_processed + 1)
                     if chunk_result:
                         processed_results.append(chunk_result)
+                    
+                    chunks_processed += 1
                 
                     # Nettoyage du chunk
                     os.remove(chunk_path)
@@ -278,7 +311,11 @@ class OCRService:
             })
 
             processing_time = time.time() - start_time
-            logger.info(f"Processing completed in {processing_time:.2f} seconds")
+            logger.info(
+                f"Processing completed in {processing_time:.2f} seconds, "
+                f"Total chunks processed: {chunks_processed}, "
+                f"Final memory usage: {psutil.virtual_memory().percent}%"
+            )
 
             # Sauvegarde des résultats
             await self.document_saver.save_results(final_result, filename)
