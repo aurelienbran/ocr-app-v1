@@ -34,20 +34,26 @@ class OCRService:
         processor_id = os.getenv('DOCUMENT_AI_PROCESSOR_ID')
         project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
 
-        # Configuration explicite de l'endpoint européen avec retry et timeout
+        # Configuration de l'endpoint européen
         client_options = {
-            "api_endpoint": "eu-documentai.googleapis.com",
-            "retry": retry.Retry(
-                initial=1.0,  # temps d'attente initial
-                maximum=60.0,  # temps d'attente maximum
-                multiplier=2.0,  # multiplicateur pour le backoff
-                deadline=300.0  # deadline globale
-            )
+            "api_endpoint": f"{location}-documentai.googleapis.com"
         }
         
-        self.documentai_client = documentai.DocumentProcessorServiceClient(client_options=client_options)
+        self.documentai_client = documentai.DocumentProcessorServiceClient(
+            client_options=client_options
+        )
+        
         self.processor_name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
 
+    @retry.Retry(
+        initial=1.0,
+        maximum=60.0,
+        multiplier=2.0,
+        predicate=retry.if_exception_type(
+            TimeoutError,
+            ConnectionError
+        )
+    )
     async def process_document(self, content: bytes, filename: str) -> Dict[str, Any]:
         start_time = time.time()
         try:
@@ -58,16 +64,22 @@ class OCRService:
             logger.info(f"Split PDF into {len(pdf_chunks)} chunks")
 
             # Process chunks with timeout
-            docai_tasks = [
-                asyncio.create_task(self._process_chunk_with_timeout(chunk, i))
-                for i, chunk in enumerate(pdf_chunks)
-            ]
+            docai_tasks = []
+            for i, chunk in enumerate(pdf_chunks):
+                task = asyncio.create_task(self._process_chunk_with_timeout(chunk, i))
+                docai_tasks.append(task)
 
             # Wait for all chunks with timeout
             docai_results = await asyncio.gather(*docai_tasks, return_exceptions=True)
             
             # Filter out any failed chunks
-            successful_results = [r for r in docai_results if isinstance(r, dict)]
+            successful_results = []
+            for result in docai_results:
+                if isinstance(result, Exception):
+                    logger.error(f"Chunk processing failed: {str(result)}")
+                else:
+                    successful_results.append(result)
+
             if not successful_results:
                 raise Exception("All document processing chunks failed")
 
