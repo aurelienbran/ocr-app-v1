@@ -1,26 +1,45 @@
 from PyPDF2 import PdfReader, PdfWriter
-from typing import List
+from typing import List, Generator
 import io
 import gc
 import os
 from loguru import logger
+import tempfile
 
 class PDFSplitter:
-    def __init__(self, max_pages_per_chunk: int = 15, max_chunk_size: int = 10 * 1024 * 1024):  # 10MB par défaut
+    def __init__(self, max_pages_per_chunk: int = 15, max_chunk_size: int = 10 * 1024 * 1024):
         self.max_pages_per_chunk = max_pages_per_chunk
         self.max_chunk_size = max_chunk_size
+        self.temp_dir = tempfile.mkdtemp(prefix='pdf_processing_')
+
+    def _cleanup(self) -> None:
+        """Nettoie les fichiers temporaires"""
+        import shutil
+        try:
+            if os.path.exists(self.temp_dir):
+                shutil.rmtree(self.temp_dir)
+        except Exception as e:
+            logger.error(f"Error cleaning up temporary files: {str(e)}")
+
+    def __del__(self):
+        """S'assure que le nettoyage est effectué à la destruction de l'objet"""
+        self._cleanup()
 
     def split_pdf(self, pdf_content: bytes) -> List[bytes]:
-        """Split a PDF into chunks of maximum size"""
+        """Split a PDF into chunks of maximum size using temporary files"""
+        chunks = []
+        temp_input = os.path.join(self.temp_dir, 'input.pdf')
+        
         try:
-            # Créer un fichier temporaire pour le PDF source
-            temp_file = io.BytesIO(pdf_content)
-            reader = PdfReader(temp_file)
+            # Écrire le PDF d'entrée dans un fichier temporaire
+            with open(temp_input, 'wb') as f:
+                f.write(pdf_content)
+
+            # Lire le PDF à partir du fichier temporaire
+            reader = PdfReader(temp_input)
             total_pages = len(reader.pages)
-            
             logger.info(f"Starting PDF split: {total_pages} pages total")
-            
-            chunks = []
+
             for start_page in range(0, total_pages, self.max_pages_per_chunk):
                 # Créer un nouveau writer pour chaque chunk
                 writer = PdfWriter()
@@ -32,45 +51,39 @@ class PDFSplitter:
                 for page_num in range(start_page, end_page):
                     writer.add_page(reader.pages[page_num])
                 
-                # Écrire le chunk dans un buffer
-                output = io.BytesIO()
-                writer.write(output)
-                chunk_content = output.getvalue()
+                # Écrire le chunk dans un fichier temporaire
+                temp_output = os.path.join(self.temp_dir, f'chunk_{len(chunks)}.pdf')
+                with open(temp_output, 'wb') as output_file:
+                    writer.write(output_file)
                 
-                # Vérifier la taille du chunk
+                # Lire le contenu du chunk et l'ajouter à la liste
+                with open(temp_output, 'rb') as chunk_file:
+                    chunk_content = chunk_file.read()
+                
                 chunk_size_mb = len(chunk_content) / (1024 * 1024)
-                if len(chunk_content) > self.max_chunk_size:
-                    logger.warning(f"Chunk size ({chunk_size_mb:.2f}MB) exceeds maximum ({self.max_chunk_size / (1024 * 1024)}MB)")
+                logger.info(f"Chunk {len(chunks)} processed. Size: {chunk_size_mb:.2f}MB")
                 
                 chunks.append(chunk_content)
                 
-                # Nettoyage manuel après chaque chunk
-                output.close()
+                # Nettoyage explicite après chaque chunk
                 del writer
+                os.remove(temp_output)
                 gc.collect()
-                
-                logger.info(f"Chunk {len(chunks)} processed. Size: {chunk_size_mb:.2f}MB")
-            
-            # Nettoyage final
-            temp_file.close()
-            del reader
-            gc.collect()
-            
+
             logger.info(f"PDF split complete: {len(chunks)} chunks created")
             return chunks
-            
+
         except Exception as e:
             logger.error(f"Error splitting PDF: {str(e)}")
             raise
+        
         finally:
-            # S'assurer que tous les fichiers temporaires sont fermés
+            # Nettoyage
             try:
-                if 'temp_file' in locals():
-                    temp_file.close()
-                if 'output' in locals():
-                    output.close()
+                os.remove(temp_input)
             except:
                 pass
+            gc.collect()
 
     def get_memory_usage(self) -> dict:
         """Get current memory usage"""
