@@ -22,6 +22,7 @@ app = FastAPI(
     title="OCR Application",
     description="Application for processing technical documents with OCR",
     version="1.0.0",
+    openapi_version="3.0.0",  # Ajout de la version OpenAPI
     docs_url=None,  # Désactive l'endpoint /docs par défaut
     redoc_url=None  # Désactive l'endpoint /redoc par défaut
 )
@@ -55,12 +56,15 @@ async def custom_swagger_ui_html():
 
 @app.get("/openapi.json", include_in_schema=False)
 async def get_openapi_endpoint():
-    return get_openapi(
+    openapi_schema = get_openapi(
         title=app.title,
         version=app.version,
         description=app.description,
         routes=app.routes,
     )
+    # Ajouter explicitement la version OpenAPI
+    openapi_schema["openapi"] = "3.0.0"
+    return openapi_schema
 
 app.include_router(router)
 
