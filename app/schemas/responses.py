@@ -1,38 +1,8 @@
 from pydantic import BaseModel
-from typing import Optional, Dict, Any
+from typing import Dict, Any, Optional
 
 class OCRResponse(BaseModel):
-    """
-    Response model for OCR processing
-    """
+    """Modèle de réponse pour le traitement OCR"""
     success: bool
     data: Optional[Dict[str, Any]] = None
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "success": True,
-                "data": {
-                    "metadata": {
-                        "docai_confidence": 0.95,
-                        "processors": ["documentai", "vision"]
-                    },
-                    "text": {
-                        "docai": "Extracted text example",
-                        "vision": "Extracted text example"
-                    },
-                    "pages": [
-                        {
-                            "page_number": 1,
-                            "dimensions": {
-                                "width": 612,
-                                "height": 792
-                            },
-                            "layout": {
-                                "confidence": 0.95
-                            }
-                        }
-                    ]
-                }
-            }
-        }
+    error: Optional[str] = None
