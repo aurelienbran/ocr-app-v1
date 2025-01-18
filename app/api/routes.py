@@ -6,10 +6,7 @@ from typing import List
 from app.services.ocr import OCRService
 from app.schemas.responses import OCRResponse
 
-router = APIRouter(
-    prefix="",
-    tags=["OCR"]
-)
+router = APIRouter(tags=["OCR"])
 
 ocr_service = None
 DOCUMENTS_DIR = Path("documents")  # Chemin vers le répertoire des documents
@@ -17,18 +14,11 @@ DOCUMENTS_DIR = Path("documents")  # Chemin vers le répertoire des documents
 @router.post(
     "/process",
     response_model=OCRResponse,
-    summary="Process a PDF document",
-    response_description="Returns the OCR results"
+    description="Process a PDF document using OCR"
 )
-async def process_document(request: Request, file: UploadFile = File(...)):
+async def process_document(file: UploadFile = File(...)):
     """
     Process a PDF document using OCR
-    
-    Args:
-        file: PDF file to process
-        
-    Returns:
-        OCRResponse: Processed document results
     """
     global ocr_service
     
@@ -54,11 +44,12 @@ async def process_document(request: Request, file: UploadFile = File(...)):
 @router.get(
     "/files",
     response_model=List[str],
-    summary="List processed files",
-    response_description="Returns a list of processed file names"
+    description="List all processed files"
 )
 async def list_processed_files():
-    """List all available processed files"""
+    """
+    List all available processed files
+    """
     try:
         if not DOCUMENTS_DIR.exists():
             return []
@@ -70,18 +61,11 @@ async def list_processed_files():
 
 @router.get(
     "/files/{filename}",
-    summary="Download a file",
-    response_description="Returns the requested file"
+    description="Download a specific file"
 )
 async def get_file(filename: str):
     """
     Download a specific file
-    
-    Args:
-        filename: Name of the file to download
-        
-    Returns:
-        FileResponse: The requested file
     """
     try:
         file_path = DOCUMENTS_DIR / filename
@@ -98,11 +82,7 @@ async def get_file(filename: str):
         logger.error(f"Error retrieving file {filename}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.get(
-    "/health",
-    summary="Health check",
-    response_description="Returns the service health status"
-)
+@router.get("/health", description="Health check endpoint")
 async def health_check():
     """Check service health"""
     return {"status": "healthy"}
