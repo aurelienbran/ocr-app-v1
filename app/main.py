@@ -1,3 +1,15 @@
+import os
+from dotenv import load_dotenv
+
+# Charger les variables d'environnement
+load_dotenv(override=True)  # override=True force le rechargement des variables
+
+# Vérifier que les variables essentielles sont présentes
+required_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "DOCUMENT_AI_PROCESSOR_ID"]
+missing_vars = [var for var in required_vars if not os.getenv(var)]
+if missing_vars:
+    raise RuntimeError(f"Missing required environment variables: {', '.join(missing_vars)}")
+
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
