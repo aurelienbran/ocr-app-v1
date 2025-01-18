@@ -9,6 +9,7 @@ import tempfile
 import psutil
 from typing import Dict, Any, Optional, List
 from datetime import datetime
+import traceback
 
 from app.services.vision_service import VisionService
 from app.services.pdf_splitter import PDFSplitter
@@ -28,47 +29,67 @@ class ChunkProcessor:
         documentai_client: documentai.DocumentProcessorServiceClient
     ) -> List[Dict[str, Any]]:
         async def process_single_chunk(chunk: bytes, index: int) -> Dict[str, Any]:
+            logger.info(f"Starting to process chunk {index}")
             async with self.semaphore:
                 cache_key = f"{self.cache._get_hash(chunk)}"
                 if cached_result := await self.cache.get(cache_key):
                     logger.info(f"Using cached result for chunk {index}")
                     return cached_result
 
-                raw_document = documentai.RawDocument(
-                    content=chunk,
-                    mime_type="application/pdf"
-                )
-                request = documentai.ProcessRequest(
-                    name=processor_name,
-                    raw_document=raw_document
-                )
+                try:
+                    logger.info(f"Sending chunk {index} to Document AI")
+                    raw_document = documentai.RawDocument(
+                        content=chunk,
+                        mime_type="application/pdf"
+                    )
+                    request = documentai.ProcessRequest(
+                        name=processor_name,
+                        raw_document=raw_document
+                    )
 
-                result = await asyncio.to_thread(
-                    documentai_client.process_document,
-                    request=request
-                )
+                    result = await asyncio.to_thread(
+                        documentai_client.process_document,
+                        request=request
+                    )
+                    logger.info(f"Received Document AI response for chunk {index}")
 
-                processed_result = {
-                    'text': result.document.text,
-                    'pages': [{
-                        'page_number': page.page_number,
-                        'dimensions': {
-                            'width': page.dimension.width,
-                            'height': page.dimension.height
-                        },
-                        'layout': {
-                            'confidence': round(page.layout.confidence, 4)
-                        }
-                    } for page in result.document.pages],
-                    'timestamp': datetime.now().isoformat()
-                }
+                    processed_result = {
+                        'text': result.document.text,
+                        'pages': [{
+                            'page_number': page.page_number,
+                            'dimensions': {
+                                'width': page.dimension.width,
+                                'height': page.dimension.height
+                            },
+                            'layout': {
+                                'confidence': round(page.layout.confidence, 4)
+                            }
+                        } for page in result.document.pages],
+                        'timestamp': datetime.now().isoformat()
+                    }
 
-                await self.cache.set(cache_key, processed_result)
-                logger.info(f"Successfully processed chunk {index}")
-                return processed_result
+                    await self.cache.set(cache_key, processed_result)
+                    logger.info(f"Successfully processed chunk {index}")
+                    return processed_result
 
-        tasks = [process_single_chunk(chunk, i) for i, chunk in enumerate(chunks)]
-        return await asyncio.gather(*tasks)
+                except Exception as e:
+                    logger.error(f"Error processing chunk {index}: {str(e)}\n{traceback.format_exc()}")
+                    return None
+
+        # Traiter les chunks avec gestion d'erreur améliorée
+        processed_results = []
+        for index, chunk in enumerate(chunks):
+            try:
+                logger.info(f"Processing chunk {index}/{len(chunks)}")
+                result = await process_single_chunk(chunk, index)
+                if result:
+                    processed_results.append(result)
+                    logger.info(f"Added result for chunk {index}")
+            except Exception as e:
+                logger.error(f"Failed to process chunk {index}: {str(e)}\n{traceback.format_exc()}")
+
+        logger.info(f"Completed chunk processing. Successful: {len(processed_results)}/{len(chunks)}")
+        return processed_results
 
 class OCRService:
     def __init__(
@@ -116,7 +137,7 @@ class OCRService:
             self.processor_name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
             logger.info("Document AI client initialized successfully")
         except Exception as e:
-            logger.error(f"Failed to initialize Google Cloud clients: {str(e)}")
+            logger.error(f"Failed to initialize Google Cloud clients: {str(e)}\n{traceback.format_exc()}")
             raise
 
     def _cleanup(self):
@@ -126,7 +147,7 @@ class OCRService:
                 shutil.rmtree(self.temp_dir)
                 logger.info(f"Cleaned up temporary directory: {self.temp_dir}")
         except Exception as e:
-            logger.error(f"Error during cleanup: {str(e)}")
+            logger.error(f"Error during cleanup: {str(e)}\n{traceback.format_exc()}")
 
     def __del__(self):
         self._cleanup()
@@ -139,30 +160,42 @@ class OCRService:
         try:
             logger.info(f"Starting OCR processing of {filename}")
             
+            # 1. Split document into chunks
+            logger.info("Starting document splitting")
             async for chunk in self.pdf_splitter.split_pdf(content):
                 chunks.append(chunk)
             logger.info(f"Split document into {len(chunks)} chunks")
             
+            # 2. Process chunks with Document AI
+            logger.info("Starting Document AI processing")
             results = await self.chunk_processor.process_chunks(
                 chunks,
                 self.processor_name,
                 self.documentai_client
             )
-            logger.info(f"Successfully processed {len(results)} chunks")
+            logger.info(f"Successfully processed {len(results)} chunks with Document AI")
             
+            # 3. Save chunk results
             logger.info("Starting to save chunk results")
             for chunk_result in results:
                 await self.document_saver.append_result(temp_results_file, chunk_result)
             logger.info("Finished saving chunk results")
             
+            # 4. Vision AI analysis
             logger.info("Starting Vision AI analysis")
             vision_result = {}
             try:
-                vision_result = await self.vision_service.analyze_document(content, filename)
-                logger.info("Vision AI analysis completed")
+                vision_result = await asyncio.wait_for(
+                    self.vision_service.analyze_document(content, filename),
+                    timeout=300  # 5 minutes timeout for Vision AI
+                )
+                logger.info("Vision AI analysis completed successfully")
+            except asyncio.TimeoutError:
+                logger.error("Vision AI analysis timed out")
             except Exception as e:
-                logger.error(f"Vision AI failed: {str(e)}")
+                logger.error(f"Vision AI analysis failed: {str(e)}\n{traceback.format_exc()}")
             
+            # 5. Prepare final results
             metadata = {
                 'filename': filename,
                 'processing_time': time.time() - start_time,
@@ -173,12 +206,14 @@ class OCRService:
                 'classifications': vision_result.get('classifications', {})
             }
             
+            # 6. Save final results
             logger.info("Starting final save")
             save_paths = await self.document_saver.save_final_results(
                 temp_results_file,
                 filename,
                 metadata
             )
+            logger.info(f"Final results saved to: {save_paths}")
             
             processing_time = time.time() - start_time
             logger.info(
@@ -193,10 +228,12 @@ class OCRService:
             }
 
         except Exception as e:
-            logger.error(f"Document processing error: {str(e)}")
+            logger.error(f"Document processing error: {str(e)}\n{traceback.format_exc()}")
             raise
 
         finally:
+            # Cleanup
+            logger.info("Starting cleanup")
             for chunk in chunks:
                 del chunk
             if os.path.exists(temp_results_file):
@@ -206,3 +243,4 @@ class OCRService:
                 except Exception as e:
                     logger.error(f"Error cleaning up temp file: {str(e)}")
             gc.collect()
+            logger.info("Cleanup completed")
