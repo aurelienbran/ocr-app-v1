@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 
 # Charger les variables d'environnement
-load_dotenv(override=True)  # override=True force le rechargement des variables
+load_dotenv(override=True)
 
 # Vérifier que les variables essentielles sont présentes
 required_vars = ["GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION", "DOCUMENT_AI_PROCESSOR_ID"]
@@ -15,17 +15,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import router
 from loguru import logger
 import uvicorn
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 
 app = FastAPI(
     title="OCR Application",
     description="Application for processing technical documents with OCR",
     version="1.0.0",
-    servers=[
-        {
-            "url": "http://148.113.45.86:8000",
-            "description": "Production server"
-        }
-    ]
+    docs_url=None,  # Désactive l'endpoint /docs par défaut
+    redoc_url=None  # Désactive l'endpoint /redoc par défaut
 )
 
 # Active CORS
@@ -44,6 +42,25 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     logger.info(f"Response status: {response.status_code}")
     return response
+
+# Custom OpenAPI et Swagger UI endpoints
+@app.get("/docs", include_in_schema=False)
+async def custom_swagger_ui_html():
+    return get_swagger_ui_html(
+        openapi_url="/openapi.json",
+        title=app.title + " - Swagger UI",
+        swagger_js_url="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/4.15.5/swagger-ui-bundle.min.js",
+        swagger_css_url="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/4.15.5/swagger-ui.min.css",
+    )
+
+@app.get("/openapi.json", include_in_schema=False)
+async def get_openapi_endpoint():
+    return get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
 
 app.include_router(router)
 
