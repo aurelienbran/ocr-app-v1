@@ -1,27 +1,66 @@
 from google.cloud import documentai, vision_v1
 from google.cloud.documentai import Document
 from loguru import logger
-from app.services.vision_service import VisionService
-from app.services.document_saver import DocumentSaver
-from app.services.pdf_splitter import PDFSplitter
-from typing import Dict, Any, List
 import os
 import asyncio
 import time
-from google.api_core import retry
+import gc
+import io
 import tempfile
+import psutil
+from typing import Dict, Any, List
+from PyPDF2 import PdfReader, PdfWriter
+
+from app.services.vision_service import VisionService
+from app.services.document_saver import DocumentSaver
+
+class MemoryMonitor:
+    def __init__(self, max_memory_percent: float = 0.8):
+        """
+        Surveille l'utilisation mémoire du système
+        
+        :param max_memory_percent: Pourcentage maximal de mémoire avant déclenchement
+        """
+        self.max_memory_percent = max_memory_percent
+
+    def is_memory_safe(self) -> bool:
+        """
+        Vérifie si la mémoire système est dans les limites acceptables
+        
+        :return: Booléen indiquant si la mémoire est dans les limites
+        """
+        mem = psutil.virtual_memory()
+        return mem.percent < (self.max_memory_percent * 100)
 
 class OCRService:
-    def __init__(self):
+    def __init__(
+        self, 
+        max_chunk_size_mb: int = 10, 
+        max_text_size: int = 500_000, 
+        max_memory_percent: float = 0.8
+    ):
+        """
+        Service de traitement OCR avec gestion mémoire avancée
+        
+        :param max_chunk_size_mb: Taille maximale des chunks PDF
+        :param max_text_size: Taille maximale du texte fusionné
+        :param max_memory_percent: Seuil maximal d'utilisation mémoire
+        """
         self._validate_and_setup_env_variables()
         self._initialize_clients()
+        
         self.document_saver = DocumentSaver()
         self.vision_service = VisionService()
-        self.pdf_splitter = PDFSplitter()
-        self.processing_timeout = 300  # 5 minutes timeout
+        
+        self.max_chunk_size = max_chunk_size_mb * 1024 * 1024
+        self.max_text_size = max_text_size
+        self.memory_monitor = MemoryMonitor(max_memory_percent)
+        
         self.temp_dir = tempfile.mkdtemp(prefix='ocr_processing_')
+        self.processing_timeout = 600  # 10 minutes
 
     def _validate_and_setup_env_variables(self):
+        """Validation des variables d'environnement requises"""
         required_vars = [
             'GOOGLE_CLOUD_PROJECT',
             'GOOGLE_CLOUD_LOCATION',
@@ -32,6 +71,7 @@ class OCRService:
                 raise ValueError(f"Missing required environment variable: {var}")
 
     def _initialize_clients(self):
+        """Initialisation des clients Google Cloud"""
         location = os.getenv('GOOGLE_CLOUD_LOCATION')
         processor_id = os.getenv('DOCUMENT_AI_PROCESSOR_ID')
         project_id = os.getenv('GOOGLE_CLOUD_PROJECT')
@@ -47,97 +87,68 @@ class OCRService:
         self.processor_name = f"projects/{project_id}/locations/{location}/processors/{processor_id}"
 
     def _cleanup(self):
-        """Nettoie les fichiers temporaires"""
+        """Nettoyage des fichiers temporaires"""
         try:
+            import shutil
             if os.path.exists(self.temp_dir):
-                import shutil
-                shutil.rmtree(self.temp_dir)
+                shutil.rmtree(self.temp_dir, ignore_errors=True)
         except Exception as e:
-            logger.error(f"Error cleaning temporary files: {str(e)}")
+            logger.error(f"Cleanup error: {e}")
 
     def __del__(self):
         """Assure le nettoyage à la destruction"""
         self._cleanup()
 
-    async def process_document(self, content: bytes, filename: str) -> Dict[str, Any]:
-        start_time = time.time()
-        try:
-            logger.info(f"Starting processing for {filename}")
-
-            # Split PDF if necessary
-            pdf_chunks = self.pdf_splitter.split_pdf(content)
-            num_chunks = len(pdf_chunks)
-            logger.info(f"Split PDF into {num_chunks} chunks")
-
-            # Process chunks sequentially to manage memory
-            docai_results = []
-            for i, chunk in enumerate(pdf_chunks, 1):
-                logger.info(f"Processing chunk {i}/{num_chunks}")
-                try:
-                    # Save chunk to temp file to reduce memory usage
-                    chunk_path = os.path.join(self.temp_dir, f'chunk_{i}.pdf')
-                    with open(chunk_path, 'wb') as f:
-                        f.write(chunk)
-
-                    # Process chunk
-                    result = await self._process_chunk_with_timeout(chunk_path, i)
-                    if result:
-                        docai_results.append(result)
-
-                    # Clean up chunk file
-                    os.remove(chunk_path)
-
-                except Exception as e:
-                    logger.error(f"Error processing chunk {i}: {str(e)}")
-                    # Continue with next chunk even if this one fails
-
-                # Force garbage collection after each chunk
-                del chunk
-                import gc
-                gc.collect()
-
-            if not docai_results:
-                raise Exception("All document processing chunks failed")
-
-            # Merge results from successful chunks
-            docai_result = self._merge_docai_results(docai_results)
-
-            # Process with Vision AI
-            vision_result = await self.vision_service.analyze_document(content, filename)
-
-            # Merge and save results
-            final_result = self._merge_results(docai_result, vision_result)
-
-            processing_time = time.time() - start_time
-            logger.info(f"Processing completed in {processing_time:.2f} seconds")
-
-            # Save results
-            await self.document_saver.save_results(final_result, filename)
-
-            return final_result
-
-        except Exception as e:
-            logger.error(f"Error processing document {filename}: {str(e)}")
-            raise
-
-        finally:
-            # Clean up any remaining temporary files
-            self._cleanup()
+    def _memory_efficient_chunk_generator(self, pdf_content: bytes):
+        """
+        Générateur de chunks PDF avec gestion dynamique
+        
+        :param pdf_content: Contenu du PDF à traiter
+        :yield: Chunks du PDF
+        """
+        reader = PdfReader(io.BytesIO(pdf_content))
+        total_pages = len(reader.pages)
+        
+        for start in range(0, total_pages, 15):
+            writer = PdfWriter()
+            end = min(start + 15, total_pages)
+            
+            for page_num in range(start, end):
+                writer.add_page(reader.pages[page_num])
+            
+            chunk_buffer = io.BytesIO()
+            writer.write(chunk_buffer)
+            chunk_buffer.seek(0)
+            
+            yield chunk_buffer.read()
 
     async def _process_chunk_with_timeout(self, chunk_path: str, chunk_index: int) -> Dict[str, Any]:
+        """
+        Traitement d'un chunk avec timeout
+        
+        :param chunk_path: Chemin du fichier chunk
+        :param chunk_index: Index du chunk
+        :return: Résultat du traitement ou None
+        """
         try:
             return await asyncio.wait_for(
                 self._process_with_documentai(chunk_path),
                 timeout=self.processing_timeout
             )
         except asyncio.TimeoutError:
-            logger.error(f"Chunk {chunk_index} processing timed out")
+            logger.warning(f"Chunk {chunk_index} processing timed out")
             return None
         except Exception as e:
-            logger.error(f"Error processing chunk {chunk_index}: {str(e)}")
+            logger.error(f"Chunk {chunk_index} processing error: {e}")
             return None
 
     async def _process_with_documentai(self, chunk_path: str) -> Dict[str, Any]:
+        """
+        Traitement d'un chunk avec Document AI
+        
+        :param chunk_path: Chemin du chunk PDF
+        :return: Résultat du traitement
+        """
         try:
             with open(chunk_path, 'rb') as f:
                 content = f.read()
@@ -151,7 +162,6 @@ class OCRService:
                 raw_document=raw_document
             )
 
-            # Utiliser to_thread pour le traitement asynchrone
             result = await asyncio.to_thread(
                 self.documentai_client.process_document,
                 request=request
@@ -160,10 +170,16 @@ class OCRService:
             return self._process_docai_response(result.document)
 
         except Exception as e:
-            logger.error(f"Error in Document AI processing: {str(e)}")
+            logger.error(f"Document AI processing error: {e}")
             raise
 
     def _process_docai_response(self, document: Document) -> Dict[str, Any]:
+        """
+        Traitement de la réponse de Document AI
+        
+        :param document: Document traité
+        :return: Résultat structuré
+        """
         return {
             'text': document.text,
             'pages': [{
@@ -178,51 +194,101 @@ class OCRService:
             } for page in document.pages]
         }
 
-    def _merge_docai_results(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
-        if not results:
-            return {}
-
-        # Start with a deep copy of the first result to avoid modifications
-        from copy import deepcopy
-        merged = deepcopy(results[0])
-
-        # Combine texts with proper spacing
-        merged['text'] = '\n\n'.join(r.get('text', '') for r in results if r.get('text'))
-
-        # Merge pages and ensure proper page numbering
-        merged['pages'] = []
-        current_page = 1
+    def _safe_merge_results(self, results: List[Dict]) -> Dict:
+        """
+        Fusion sécurisée des résultats avec contrôles stricts
+        
+        :param results: Liste des résultats de chunks
+        :return: Résultat fusionné
+        """
+        merged = {
+            'text': '',
+            'pages': [],
+            'metadata': {
+                'total_chunks': len(results),
+                'processors': set()
+            }
+        }
 
         for result in results:
-            pages = result.get('pages', [])
-            for page in pages:
-                page_copy = deepcopy(page)
-                page_copy['page_number'] = current_page
-                merged['pages'].append(page_copy)
-                current_page += 1
+            text_chunk = result.get('text', '')[:self.max_text_size - len(merged['text'])]
+            merged['text'] += text_chunk
+            merged['pages'].extend(result.get('pages', []))
+            merged['metadata']['processors'].update(
+                result.get('metadata', {}).get('processors', [])
+            )
+
+            if len(merged['text']) >= self.max_text_size:
+                break
 
         return merged
 
-    def _merge_results(self, docai_result: Dict[str, Any], vision_result: Dict[str, Any]) -> Dict[str, Any]:
-        """Fusionne les résultats de Document AI et Vision AI"""
+    async def process_document(self, content: bytes, filename: str) -> Dict[str, Any]:
+        """
+        Processus principal de traitement du document
+        
+        :param content: Contenu du document
+        :param filename: Nom du fichier
+        :return: Résultat du traitement
+        """
+        start_time = time.time()
         try:
-            if not docai_result and not vision_result:
-                raise ValueError("Both Document AI and Vision AI results are empty")
+            logger.info(f"Starting processing for {filename}")
 
-            return {
-                'metadata': {
-                    **vision_result.get('metadata', {}),
-                    'docai_confidence': docai_result.get('pages', [{}])[0].get('layout', {}).get('confidence', 0.0),
-                    'processors': ['documentai', 'vision']
-                },
-                'text': {
-                    'docai': docai_result.get('text', ''),
-                    'vision': vision_result.get('text', '')
-                },
-                'pages': docai_result.get('pages', []),
+            # Liste pour résultats avec limitation
+            processed_results = []
+            
+            async for chunk in self._memory_efficient_chunk_generator(content):
+                # Vérification de la mémoire avant chaque traitement
+                if not self.memory_monitor.is_memory_safe():
+                    logger.warning("Memory threshold reached. Pausing processing.")
+                    await asyncio.sleep(5)  # Pause pour libération
+                
+                # Sauvegarde temporaire du chunk
+                chunk_path = os.path.join(self.temp_dir, f'chunk_{len(processed_results)}.pdf')
+                with open(chunk_path, 'wb') as f:
+                    f.write(chunk)
+
+                try:
+                    # Traitement du chunk
+                    chunk_result = await self._process_chunk_with_timeout(chunk_path, len(processed_results) + 1)
+                    if chunk_result:
+                        processed_results.append(chunk_result)
+                
+                    # Nettoyage du chunk
+                    os.remove(chunk_path)
+
+                except Exception as e:
+                    logger.error(f"Chunk processing error: {e}")
+                
+                # Libération explicite
+                del chunk
+                gc.collect()
+
+            # Traitement Vision AI
+            vision_result = await self.vision_service.analyze_document(content, filename)
+
+            # Fusion des résultats
+            final_result = self._safe_merge_results(processed_results)
+            
+            # Compléter avec les résultats Vision AI
+            final_result.update({
                 'visual_elements': vision_result.get('visual_elements', {}),
                 'classifications': vision_result.get('classifications', {})
-            }
+            })
+
+            processing_time = time.time() - start_time
+            logger.info(f"Processing completed in {processing_time:.2f} seconds")
+
+            # Sauvegarde des résultats
+            await self.document_saver.save_results(final_result, filename)
+
+            return final_result
+
         except Exception as e:
-            logger.error(f"Error merging results: {str(e)}")
+            logger.error(f"Document processing error: {str(e)}")
             raise
+
+        finally:
+            self._cleanup()
+            gc.collect()
