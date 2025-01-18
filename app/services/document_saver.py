@@ -1,71 +1,109 @@
-from pathlib import Path
-from typing import Dict, Any
-from datetime import datetime
 import json
 import os
+import aiofiles
+from typing import Dict, Any
+from loguru import logger
+import tempfile
+from datetime import datetime
 
 class DocumentSaver:
     def __init__(self, base_path: str = "documents"):
-        self.base_path = Path(base_path)
-        self._ensure_output_directory()
+        self.base_path = base_path
+        os.makedirs(base_path, exist_ok=True)
+        self.temp_dir = tempfile.mkdtemp(prefix='doc_saver_')
+        logger.info(f"Initialized DocumentSaver with base path: {base_path}")
 
-    def _ensure_output_directory(self):
-        """Ensure the output directory exists"""
-        if not self.base_path.exists():
-            self.base_path.mkdir(parents=True)
+    def _cleanup(self):
+        """Nettoie les fichiers temporaires"""
+        try:
+            if os.path.exists(self.temp_dir):
+                import shutil
+                shutil.rmtree(self.temp_dir)
+        except Exception as e:
+            logger.error(f"Error cleaning temporary files: {str(e)}")
 
-    async def save_results(self, results: Dict[str, Any], original_filename: str) -> Dict[str, str]:
-        """Save OCR results in multiple formats"""
+    def __del__(self):
+        self._cleanup()
+
+    def _get_timestamp_path(self) -> str:
+        """Crée un chemin basé sur le timestamp"""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        base_filename = f"{timestamp}_{Path(original_filename).stem}"
+        path = os.path.join(self.base_path, timestamp)
+        os.makedirs(path, exist_ok=True)
+        return path
 
-        # Save JSON results
-        json_path = self.base_path / f"{base_filename}_results.json"
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(results, f, ensure_ascii=False, indent=2)
+    async def append_result(self, temp_file: str, result: Dict[str, Any]) -> None:
+        """
+        Ajoute un résultat au fichier temporaire de manière asynchrone
+        
+        :param temp_file: Chemin du fichier temporaire
+        :param result: Résultat à ajouter
+        """
+        try:
+            async with aiofiles.open(temp_file, mode='a') as f:
+                await f.write(json.dumps(result) + '\n')
+        except Exception as e:
+            logger.error(f"Error appending result: {str(e)}")
+            raise
 
-        # Save extracted text
-        text_path = self.base_path / f"{base_filename}_text.txt"
-        with open(text_path, 'w', encoding='utf-8') as f:
-            f.write("=== Document AI Text ===\n")
-            f.write(results['text']['docai'])
-            f.write("\n\n=== Vision AI Text ===\n")
-            f.write(results['text']['vision'])
-
-        # Save summary
-        summary_path = self.base_path / f"{base_filename}_summary.txt"
-        with open(summary_path, 'w', encoding='utf-8') as f:
-            f.write(self._generate_summary(results))
-
-        return {
-            'json': str(json_path),
-            'text': str(text_path),
-            'summary': str(summary_path)
+    async def save_final_results(self, temp_file: str, filename: str, metadata: Dict[str, Any] = None) -> Dict[str, str]:
+        """
+        Sauvegarde les résultats finals à partir du fichier temporaire
+        
+        :param temp_file: Chemin du fichier temporaire
+        :param filename: Nom du fichier original
+        :param metadata: Métadonnées additionnelles
+        :return: Chemins des fichiers sauvegardés
+        """
+        save_path = self._get_timestamp_path()
+        base_name = os.path.splitext(os.path.basename(filename))[0]
+        
+        result_paths = {
+            'json': os.path.join(save_path, f"{base_name}_results.json"),
+            'text': os.path.join(save_path, f"{base_name}_text.txt"),
+            'summary': os.path.join(save_path, f"{base_name}_summary.txt")
         }
 
-    def _generate_summary(self, results: Dict[str, Any]) -> str:
-        """Generate a human-readable summary of the results"""
-        summary = ["=== OCR Processing Summary ==="]
+        try:
+            # Fusion des résultats en streaming
+            merged_results = {
+                'text': '',
+                'pages': [],
+                'metadata': metadata or {},
+                'chunks_processed': 0
+            }
 
-        # Add metadata
-        summary.append("\nMetadata:")
-        metadata = results.get('metadata', {})
-        for key, value in metadata.items():
-            summary.append(f"- {key}: {value}")
+            async with aiofiles.open(temp_file, mode='r') as f:
+                async for line in f:
+                    chunk_result = json.loads(line)
+                    merged_results['text'] += chunk_result.get('text', '')
+                    merged_results['pages'].extend(chunk_result.get('pages', []))
+                    merged_results['chunks_processed'] += 1
 
-        # Add page information
-        pages = results.get('pages', [])
-        summary.append(f"\nPages Processed: {len(pages)}")
-        for page in pages:
-            confidence = page.get('layout', {}).get('confidence', 0)
-            summary.append(f"- Page {page['page_number']}: Confidence {confidence:.2%}")
+            # Sauvegarder les résultats JSON
+            async with aiofiles.open(result_paths['json'], mode='w') as f:
+                await f.write(json.dumps(merged_results, indent=2))
 
-        # Add visual elements summary
-        visual_elements = results.get('visual_elements', {})
-        if visual_elements:
-            summary.append("\nVisual Elements:")
-            objects = visual_elements.get('objects', [])
-            if objects:
-                summary.append(f"- Detected Objects: {len(objects)}")
+            # Sauvegarder le texte extrait
+            async with aiofiles.open(result_paths['text'], mode='w') as f:
+                await f.write(merged_results['text'])
 
-        return '\n'.join(summary)
+            # Créer et sauvegarder le résumé
+            summary = (
+                f"Document Analysis Summary\n"
+                f"------------------------\n"
+                f"Filename: {filename}\n"
+                f"Total pages: {len(merged_results['pages'])}\n"
+                f"Chunks processed: {merged_results['chunks_processed']}\n"
+                f"Text length: {len(merged_results['text'])} characters\n"
+            )
+
+            async with aiofiles.open(result_paths['summary'], mode='w') as f:
+                await f.write(summary)
+
+            logger.info(f"Results saved successfully in {save_path}")
+            return result_paths
+
+        except Exception as e:
+            logger.error(f"Error saving final results: {str(e)}")
+            raise
