@@ -1,10 +1,12 @@
-from pydantic import BaseModel, Field
-from typing import Optional, Any, Dict, List
+from pydantic import BaseModel
+from typing import Optional, Dict, Any
 
 class OCRResponse(BaseModel):
-    """Response model for OCR processing"""
-    success: bool = Field(..., description="Indicates if the processing was successful")
-    data: Optional[Dict[str, Any]] = Field(None, description="Processed document data")
+    """
+    Response model for OCR processing
+    """
+    success: bool
+    data: Optional[Dict[str, Any]] = None
     
     class Config:
         json_schema_extra = {
@@ -16,8 +18,8 @@ class OCRResponse(BaseModel):
                         "processors": ["documentai", "vision"]
                     },
                     "text": {
-                        "docai": "Extracted text...",
-                        "vision": "Extracted text..."
+                        "docai": "Extracted text example",
+                        "vision": "Extracted text example"
                     },
                     "pages": [
                         {
