@@ -20,53 +20,6 @@ import uvicorn
 from fastapi.openapi.docs import get_swagger_ui_html
 from fastapi.openapi.utils import get_openapi
 
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-
-    openapi_schema = get_openapi(
-        title="OCR Application",
-        version="1.0.0",
-        description="Application for processing technical documents with OCR",
-        routes=app.routes,
-    )
-
-    # Set explicitly OpenAPI version
-    openapi_schema["openapi"] = "3.0.0"
-
-    # Add additional configurations for file upload
-    openapi_schema["components"] = {
-        "schemas": {
-            "HTTPValidationError": {
-                "title": "HTTPValidationError",
-                "type": "object",
-                "properties": {
-                    "detail": {
-                        "title": "Detail",
-                        "type": "array",
-                        "items": {"$ref": "#/components/schemas/ValidationError"}
-                    }
-                }
-            },
-            "ValidationError": {
-                "title": "ValidationError",
-                "type": "object",
-                "properties": {
-                    "loc": {
-                        "title": "Location",
-                        "type": "array",
-                        "items": {"type": "string"}
-                    },
-                    "msg": {"title": "Message", "type": "string"},
-                    "type": {"title": "Error Type", "type": "string"}
-                }
-            }
-        }
-    }
-
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
-
 app = FastAPI(
     title="OCR Application",
     description="Application for processing technical documents with OCR",
@@ -74,6 +27,39 @@ app = FastAPI(
     docs_url=None,
     redoc_url=None
 )
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = {
+        "openapi": "3.0.0",
+        "info": {
+            "title": "OCR Application",
+            "description": "Application for processing technical documents with OCR",
+            "version": "1.0.0"
+        },
+        "paths": {},
+        "components": {
+            "schemas": {}
+        }
+    }
+
+    # Ajout des routes et schémas existants
+    schema_ext = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    # Fusionner les schémas
+    openapi_schema["paths"] = schema_ext["paths"]
+    if "components" in schema_ext:
+        openapi_schema["components"].update(schema_ext["components"])
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
 
 # Custom exception handler
 @app.exception_handler(RequestValidationError)
@@ -119,7 +105,6 @@ async def custom_swagger_ui_html():
 async def get_openapi_endpoint():
     return custom_openapi()
 
-# Inclure les routes
 app.include_router(router)
 
 if __name__ == "__main__":
@@ -128,10 +113,10 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         log_level="debug",
-        limit_concurrency=10,  # Limite le nombre de connexions simultanées
-        limit_max_requests=100,  # Limite le nombre maximum de requêtes
-        timeout_keep_alive=5,  # Réduit le temps de maintien des connexions
-        workers=4  # Nombre de workers pour gérer les requêtes
+        limit_concurrency=10,
+        limit_max_requests=100,
+        timeout_keep_alive=5,
+        workers=4
     )
     server = uvicorn.Server(uvicorn_config)
     server.run()
