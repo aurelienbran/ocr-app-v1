@@ -8,6 +8,7 @@ from app.schemas.responses import OCRResponse
 import tempfile
 import os
 import asyncio
+import psutil
 
 router = APIRouter()
 ocr_service = None
@@ -15,7 +16,7 @@ DOCUMENTS_DIR = Path("documents")  # Chemin vers le répertoire des documents
 CHUNK_SIZE = 1024 * 1024  # 1MB chunks for file reading
 
 @router.post("/process", response_model=OCRResponse)
-async def process_document(file: UploadFile = File(...), request: Request):
+async def process_document(request: Request, file: UploadFile = File(...)):
     """Process a PDF document using OCR"""
     global ocr_service
     
@@ -94,7 +95,6 @@ async def health_check():
 def get_memory_info():
     """Get current memory usage information"""
     try:
-        import psutil
         process = psutil.Process(os.getpid())
         memory_info = process.memory_info()
         return {
