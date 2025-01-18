@@ -22,8 +22,12 @@ app = FastAPI(
     title="OCR Application",
     description="Application for processing technical documents with OCR",
     version="1.0.0",
-    openapi_version="3.0.0",
-    root_path=""
+    servers=[
+        {
+            "url": "http://148.113.45.86:8000",
+            "description": "Production server"
+        }
+    ]
 )
 
 # Custom exception handler
@@ -58,49 +62,12 @@ async def log_requests(request: Request, call_next):
 # Inclure les routes
 app.include_router(router)
 
-# Configuration additionnelle OpenAPI
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-
-    schema = app.openapi()
-    schema["openapi"] = "3.0.0"
-    
-    # Ajout des composants nécessaires
-    if "components" not in schema:
-        schema["components"] = {}
-    
-    if "schemas" not in schema["components"]:
-        schema["components"]["schemas"] = {}
-
-    # Définition du schéma de réponse pour les fichiers
-    schema["components"]["schemas"]["HTTPValidationError"] = {
-        "title": "HTTPValidationError",
-        "type": "object",
-        "properties": {
-            "detail": {
-                "title": "Detail",
-                "type": "array",
-                "items": {"$ref": "#/components/schemas/ValidationError"}
-            }
-        }
-    }
-
-    app.openapi_schema = schema
-    return app.openapi_schema
-
-app.openapi = custom_openapi
-
 if __name__ == "__main__":
     config = uvicorn.Config(
         app,
         host="0.0.0.0",
         port=8000,
-        log_level="debug",
-        limit_concurrency=10,
-        limit_max_requests=100,
-        timeout_keep_alive=5,
-        workers=4
+        log_level="debug"
     )
     server = uvicorn.Server(config)
     server.run()
