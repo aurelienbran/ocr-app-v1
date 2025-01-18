@@ -47,30 +47,48 @@ logger.add(
     diagnose=True
 )
 
+# Configurations globales
+GLOBAL_TIMEOUT = 1800  # 30 minutes
+MEMORY_THRESHOLD = 0.80  # 80% d'utilisation mémoire
+MEMORY_CHECK_INTERVAL = 30  # Vérifier la mémoire toutes les 30 secondes
+
 class MemoryMiddleware:
     def __init__(self, get_response: Callable):
         self.get_response = get_response
-        self.memory_threshold = 0.80  # 80% d'utilisation mémoire
+        self.memory_threshold = MEMORY_THRESHOLD
+        self.check_interval = MEMORY_CHECK_INTERVAL
+
+    async def check_memory_periodically(self):
+        """Surveille périodiquement l'utilisation de la mémoire"""
+        while True:
+            current_memory = psutil.Process(os.getpid()).memory_percent()
+            if current_memory > self.memory_threshold:
+                logger.warning(f"High memory usage: {current_memory:.1f}%")
+                gc.collect()
+            await asyncio.sleep(self.check_interval)
 
     async def __call__(self, request: Request) -> Response:
-        # Vérifier l'utilisation de la mémoire avant le traitement
-        current_memory = psutil.Process(os.getpid()).memory_percent()
-        logger.info(f"Current memory usage: {current_memory:.1f}%")
+        # Démarrer la surveillance mémoire en background
+        monitor_task = asyncio.create_task(self.check_memory_periodically())
+        
+        try:
+            # Vérifier l'utilisation de la mémoire avant le traitement
+            current_memory = psutil.Process(os.getpid()).memory_percent()
+            logger.info(f"Current memory usage: {current_memory:.1f}%")
 
-        if current_memory > self.memory_threshold:
-            # Forcer le garbage collection si l'utilisation mémoire est élevée
-            logger.warning("High memory usage detected, forcing garbage collection")
+            # Monitorer l'utilisation mémoire pendant le traitement
+            start_memory = psutil.Process(os.getpid()).memory_info().rss
+            response = await self.get_response(request)
+            end_memory = psutil.Process(os.getpid()).memory_info().rss
+
+            memory_diff = end_memory - start_memory
+            logger.info(f"Memory change during request: {memory_diff/1024/1024:.1f}MB")
+
+            return response
+        finally:
+            # Arrêter la surveillance mémoire
+            monitor_task.cancel()
             gc.collect()
-
-        # Monitorer l'utilisation mémoire pendant le traitement
-        start_memory = psutil.Process(os.getpid()).memory_info().rss
-        response = await self.get_response(request)
-        end_memory = psutil.Process(os.getpid()).memory_info().rss
-
-        memory_diff = end_memory - start_memory
-        logger.info(f"Memory change during request: {memory_diff/1024/1024:.1f}MB")
-
-        return response
 
 app = FastAPI(
     title="OCR Application",
@@ -114,27 +132,28 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 # Active CORS avec options limitées
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://148.113.45.86:8000"],  # Restreindre aux origines nécessaires
+    allow_origins=["http://148.113.45.86:8000"],
     allow_credentials=True,
-    allow_methods=["POST", "GET"],  # Limiter aux méthodes nécessaires
+    allow_methods=["POST", "GET"],
     allow_headers=["*"],
-    max_age=3600  # Cache CORS pour 1 heure
+    max_age=3600
 )
 
 @app.middleware("http")
 async def memory_management(request: Request, call_next):
-    """Middleware pour gérer la mémoire"""
+    """Middleware pour gérer la mémoire avec timeout augmenté"""
     process = psutil.Process(os.getpid())
+    response = None
     
     try:
         # Log initial memory state
         initial_memory = process.memory_info()
         logger.info(f"Request start memory: RSS={initial_memory.rss/1024/1024:.1f}MB")
         
-        # Traiter la requête avec timeout
+        # Traiter la requête avec un timeout plus long
         response = await asyncio.wait_for(
             call_next(request),
-            timeout=300  # 5 minutes timeout
+            timeout=GLOBAL_TIMEOUT
         )
         
         # Forcer le GC après le traitement
@@ -148,7 +167,9 @@ async def memory_management(request: Request, call_next):
         return response
         
     except asyncio.TimeoutError:
-        logger.error("Request timeout")
+        logger.error(f"Request timeout after {GLOBAL_TIMEOUT} seconds")
+        if response:
+            return response
         raise
     except Exception as e:
         logger.error(f"Request error: {str(e)}")
@@ -177,13 +198,14 @@ config = {
     "host": "0.0.0.0",
     "port": 8000,
     "log_level": "info",
-    "workers": 1,                    # Un seul worker pour mieux gérer la mémoire
-    "limit_concurrency": 5,          # Limite le nombre de connexions simultanées
-    "limit_max_requests": 100,       # Redémarrage périodique pour éviter les fuites
-    "timeout_keep_alive": 5,         # Réduit le temps de maintien des connexions
-    "backlog": 2048,                 # File d'attente des connexions
-    "h11_max_incomplete_size": 1024, # Limite la taille des requêtes incomplètes
-    "access_log": False,             # Désactiver les logs d'accès intégrés (on utilise loguru)
+    "workers": 1,
+    "limit_concurrency": 5,
+    "limit_max_requests": 100,
+    "timeout_keep_alive": 5,
+    "backlog": 2048,
+    "h11_max_incomplete_size": 1024,
+    "access_log": False,
+    "timeout": GLOBAL_TIMEOUT  # Synchroniser avec le timeout global
 }
 
 if __name__ == "__main__":
