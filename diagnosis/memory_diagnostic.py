@@ -153,7 +153,12 @@ async def main():
     # Chemin du document à tester (à remplacer)
     test_document = sys.argv[1] if len(sys.argv) > 1 else None
     
-    diagnostic.run_full_diagnostic(test_document)
+    if test_document:
+        # Utiliser une méthode asyncio appropriée
+        await diagnostic.async_memory_test(test_document)
+    else:
+        diagnostic.log_system_info()
 
 if __name__ == "__main__":
+    # Utiliser cette méthode pour lancer le script asynchrone
     asyncio.run(main())
