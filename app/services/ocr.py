@@ -15,7 +15,7 @@ from app.services.vision_service import VisionService
 from app.services.document_saver import DocumentSaver
 
 class MemoryMonitor:
-    def __init__(self, max_memory_percent: float = 0.8):
+    def __init__(self, max_memory_percent: float = 0.7):
         """
         Surveille l'utilisation mémoire du système
         
@@ -41,22 +41,20 @@ class MemoryMonitor:
 class OCRService:
     def __init__(
         self, 
-        max_chunk_size_mb: int = 10, 
-        max_text_size: int = 500_000, 
-        max_memory_percent: float = 0.8,
-        chunk_pages: int = 15,
-        processing_timeout: int = 600,
-        max_retries: int = 3
+        max_chunk_pages: int = 10,  # Réduction du nombre de pages par chunk
+        max_text_size: int = 250_000,  # Réduction de la taille de texte
+        max_memory_percent: float = 0.7,  # Seuil mémoire plus bas
+        processing_timeout: int = 300,  # Réduction du timeout
+        memory_check_interval: int = 2  # Vérification mémoire plus fréquente
     ):
         """
         Service de traitement OCR avec gestion mémoire avancée
         
-        :param max_chunk_size_mb: Taille maximale des chunks PDF
+        :param max_chunk_pages: Nombre maximal de pages par chunk
         :param max_text_size: Taille maximale du texte fusionné
         :param max_memory_percent: Seuil maximal d'utilisation mémoire
-        :param chunk_pages: Nombre de pages par chunk
         :param processing_timeout: Timeout pour le traitement d'un chunk
-        :param max_retries: Nombre maximal de tentatives par chunk
+        :param memory_check_interval: Intervalle de vérification mémoire
         """
         self._validate_and_setup_env_variables()
         self._initialize_clients()
@@ -64,11 +62,10 @@ class OCRService:
         self.document_saver = DocumentSaver()
         self.vision_service = VisionService()
         
-        self.max_chunk_size = max_chunk_size_mb * 1024 * 1024
+        self.max_chunk_pages = max_chunk_pages
         self.max_text_size = max_text_size
-        self.chunk_pages = chunk_pages
         self.processing_timeout = processing_timeout
-        self.max_retries = max_retries
+        self.memory_check_interval = memory_check_interval
         
         self.memory_monitor = MemoryMonitor(max_memory_percent)
         
@@ -116,39 +113,34 @@ class OCRService:
 
     async def _memory_efficient_chunk_generator(self, pdf_content: bytes) -> AsyncGenerator[bytes, None]:
         """
-        Générateur ASYNCHRONE de chunks PDF avec gestion dynamique
-        
-        :param pdf_content: Contenu du PDF à traiter
-        :yield: Chunks du PDF
+        Générateur de chunks avec contrôle mémoire strict
         """
-        # Utiliser un thread pour éviter de bloquer l'event loop
-        reader = await asyncio.to_thread(PdfReader, io.BytesIO(pdf_content))
+        def create_chunk(reader, start, end):
+            writer = PdfWriter()
+            for page_num in range(start, end):
+                writer.add_page(reader.pages[page_num])
+            
+            chunk_buffer = io.BytesIO()
+            writer.write(chunk_buffer)
+            chunk_buffer.seek(0)
+            return chunk_buffer.read()
+
+        reader = PdfReader(io.BytesIO(pdf_content))
         total_pages = len(reader.pages)
         
-        for start in range(0, total_pages, self.chunk_pages):
-            # Utiliser un thread pour la création de chunks
-            writer = await asyncio.to_thread(PdfWriter)
-            end = min(start + self.chunk_pages, total_pages)
+        for start in range(0, total_pages, self.max_chunk_pages):
+            # Vérification mémoire avant chaque chunk
+            if not self.memory_monitor.is_memory_safe():
+                logger.warning("High memory usage. Pausing chunk generation.")
+                await asyncio.sleep(self.memory_check_interval)
             
-            for page_num in range(start, end):
-                await asyncio.to_thread(writer.add_page, reader.pages[page_num])
+            end = min(start + self.max_chunk_pages, total_pages)
+            chunk = await asyncio.to_thread(create_chunk, reader, start, end)
             
-            # Écriture et lecture du chunk de manière asynchrone
-            chunk_buffer = await asyncio.to_thread(self._write_chunk, writer)
+            # Libération explicite
+            gc.collect()
             
-            yield chunk_buffer
-
-    def _write_chunk(self, writer: PdfWriter) -> bytes:
-        """
-        Écrit un chunk PDF et retourne son contenu
-        
-        :param writer: Objet PdfWriter
-        :return: Contenu du chunk en bytes
-        """
-        chunk_buffer = io.BytesIO()
-        writer.write(chunk_buffer)
-        chunk_buffer.seek(0)
-        return chunk_buffer.read()
+            yield chunk
 
     async def _process_chunk_with_timeout(self, chunk_path: str, chunk_index: int) -> Optional[Dict[str, Any]]:
         """
@@ -158,7 +150,8 @@ class OCRService:
         :param chunk_index: Index du chunk
         :return: Résultat du traitement ou None
         """
-        for attempt in range(self.max_retries):
+        max_retries = 3
+        for attempt in range(max_retries):
             try:
                 result = await asyncio.wait_for(
                     self._process_with_documentai(chunk_path),
@@ -169,14 +162,14 @@ class OCRService:
             except asyncio.TimeoutError:
                 logger.warning(
                     f"Chunk {chunk_index} processing timed out "
-                    f"(Attempt {attempt + 1}/{self.max_retries})"
+                    f"(Attempt {attempt + 1}/{max_retries})"
                 )
-                if attempt == self.max_retries - 1:
+                if attempt == max_retries - 1:
                     return None
             
             except Exception as e:
                 logger.error(f"Chunk {chunk_index} processing error: {e}")
-                if attempt == self.max_retries - 1:
+                if attempt == max_retries - 1:
                     return None
                 
                 # Délai entre les tentatives
@@ -265,52 +258,54 @@ class OCRService:
 
     async def process_document(self, content: bytes, filename: str) -> Dict[str, Any]:
         """
-        Processus principal de traitement du document
+        Processus de traitement avec contrôle mémoire renforcé
         
         :param content: Contenu du document
         :param filename: Nom du fichier
         :return: Résultat du traitement
         """
         start_time = time.time()
+        processed_results = []
+        chunks_processed = 0
+
         try:
             logger.info(
                 f"Starting processing for {filename}, "
                 f"Initial memory usage: {psutil.virtual_memory().percent}%"
             )
 
-            # Liste pour résultats avec limitation
-            processed_results = []
-            chunks_processed = 0
-            
-            # Utiliser l'async generator correctement
             async for chunk in self._memory_efficient_chunk_generator(content):
-                # Vérification de la mémoire avant chaque traitement
+                # Contrôle mémoire strict
                 if not self.memory_monitor.is_memory_safe():
-                    logger.warning("Memory threshold reached. Pausing processing.")
-                    await asyncio.sleep(5)  # Pause pour libération
-                
-                # Sauvegarde temporaire du chunk
-                chunk_path = os.path.join(self.temp_dir, f'chunk_{chunks_processed}.pdf')
-                with open(chunk_path, 'wb') as f:
-                    f.write(chunk)
+                    logger.warning("Memory threshold exceeded. Stopping processing.")
+                    break
 
-                try:
-                    # Traitement du chunk
-                    chunk_result = await self._process_chunk_with_timeout(chunk_path, chunks_processed + 1)
-                    if chunk_result:
-                        processed_results.append(chunk_result)
+                # Traitement du chunk avec gestion temporaire
+                with tempfile.NamedTemporaryFile(delete=True, suffix='.pdf') as temp_chunk:
+                    temp_chunk.write(chunk)
+                    temp_chunk.flush()
+
+                    try:
+                        chunk_result = await self._process_chunk_with_timeout(
+                            temp_chunk.name, 
+                            chunks_processed + 1
+                        )
+                        
+                        if chunk_result:
+                            processed_results.append(chunk_result)
+                        
+                        chunks_processed += 1
                     
-                    chunks_processed += 1
-                
-                    # Nettoyage du chunk
-                    os.remove(chunk_path)
-
-                except Exception as e:
-                    logger.error(f"Chunk processing error: {e}")
+                    except Exception as e:
+                        logger.error(f"Chunk processing error: {e}")
                 
                 # Libération explicite
                 del chunk
                 gc.collect()
+
+                # Pause si mémoire haute
+                if not self.memory_monitor.is_memory_safe():
+                    await asyncio.sleep(self.memory_check_interval)
 
             # Traitement Vision AI
             vision_result = await self.vision_service.analyze_document(content, filename)
