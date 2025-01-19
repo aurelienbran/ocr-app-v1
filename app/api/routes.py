@@ -43,43 +43,76 @@ async def process_document(file: UploadFile = File(...)):
 
 @router.get(
     "/files",
-    response_model=List[str],
-    description="List all processed files"
+    response_model=List[dict],
+    description="List all processed files with their details"
 )
 async def list_processed_files():
     """
-    List all available processed files
+    List all available processed files with details about modification time and size
     """
     try:
         if not DOCUMENTS_DIR.exists():
             return []
-        files = [f.name for f in DOCUMENTS_DIR.iterdir() if f.is_file()]
-        return sorted(files, key=lambda x: Path(DOCUMENTS_DIR / x).stat().st_mtime, reverse=True)
+
+        files = []
+        # Parcourir tous les sous-répertoires dans documents/
+        for subdir in DOCUMENTS_DIR.iterdir():
+            if subdir.is_dir():
+                for file_path in subdir.glob("*.*"):
+                    if file_path.is_file():
+                        files.append({
+                            "name": file_path.name,
+                            "path": str(file_path.relative_to(DOCUMENTS_DIR)),
+                            "size": file_path.stat().st_size,
+                            "modified": file_path.stat().st_mtime
+                        })
+        
+        # Trier par date de modification (le plus récent en premier)
+        files.sort(key=lambda x: x["modified"], reverse=True)
+        return files
     except Exception as e:
         logger.error(f"Error listing files: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get(
-    "/files/{filename}",
+    "/download/{file_path:path}",
     description="Download a specific file"
 )
-async def get_file(filename: str):
+async def download_file(file_path: str):
     """
-    Download a specific file
+    Download a specific file with proper headers for download
     """
     try:
-        file_path = DOCUMENTS_DIR / filename
-        if not file_path.exists():
-            raise HTTPException(status_code=404, detail=f"File {filename} not found")
+        # Sécuriser le chemin du fichier
+        full_path = DOCUMENTS_DIR / file_path
+        if not full_path.exists():
+            raise HTTPException(status_code=404, detail=f"File {file_path} not found")
+        
+        # Vérifier que le fichier est bien dans le répertoire documents/
+        if not str(full_path.absolute()).startswith(str(DOCUMENTS_DIR.absolute())):
+            raise HTTPException(status_code=403, detail="Access denied")
+
+        filename = full_path.name
+
+        # Déterminer le type MIME en fonction de l'extension
+        content_type = "text/plain"
+        if filename.endswith('.json'):
+            content_type = "application/json"
+        elif filename.endswith('.pdf'):
+            content_type = "application/pdf"
+
         return FileResponse(
-            path=file_path,
+            path=full_path,
             filename=filename,
-            media_type='application/octet-stream'
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}"
+            }
         )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error retrieving file {filename}: {str(e)}")
+        logger.error(f"Error retrieving file {file_path}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/health", description="Health check endpoint")
