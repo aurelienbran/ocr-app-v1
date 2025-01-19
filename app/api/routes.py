@@ -3,6 +3,7 @@ from fastapi.responses import FileResponse
 from loguru import logger
 from pathlib import Path
 from typing import List
+import shutil
 from app.services.ocr import OCRService
 from app.schemas.responses import OCRResponse
 
@@ -113,6 +114,35 @@ async def download_file(file_path: str):
         raise
     except Exception as e:
         logger.error(f"Error retrieving file {file_path}: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete(
+    "/files/{timestamp_dir}",
+    description="Delete a group of files for a specific document"
+)
+async def delete_files(timestamp_dir: str):
+    """
+    Delete all files in a specific timestamp directory
+    """
+    try:
+        dir_path = DOCUMENTS_DIR / timestamp_dir
+        
+        # Vérification de sécurité pour s'assurer que le chemin est dans le répertoire documents/
+        if not str(dir_path.absolute()).startswith(str(DOCUMENTS_DIR.absolute())):
+            raise HTTPException(status_code=403, detail="Access denied")
+            
+        if not dir_path.exists():
+            raise HTTPException(status_code=404, detail=f"Directory {timestamp_dir} not found")
+            
+        # Supprimer le répertoire et son contenu
+        shutil.rmtree(dir_path)
+        logger.info(f"Deleted directory and files: {timestamp_dir}")
+        
+        return {"status": "success", "message": f"Files in {timestamp_dir} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting files {timestamp_dir}: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/health", description="Health check endpoint")
