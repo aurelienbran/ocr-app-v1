@@ -3,6 +3,7 @@ function OCRApp() {
     const [uploading, setUploading] = React.useState(false);
     const [error, setError] = React.useState(null);
     const [processingStatus, setProcessingStatus] = React.useState('');
+    const [deleteStatus, setDeleteStatus] = React.useState('');
     
     React.useEffect(() => {
         fetchFiles();
@@ -59,15 +60,41 @@ function OCRApp() {
         }
     };
 
+    const handleDelete = async (directoryPath) => {
+        if (!confirm("Are you sure you want to delete this document and all its files?")) {
+            return;
+        }
+        try {
+            setDeleteStatus(`Deleting files...`);
+            const response = await fetch(`/files/${directoryPath}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) {
+                throw new Error('Delete failed');
+            }
+
+            setDeleteStatus('Files deleted successfully');
+            await fetchFiles();
+        } catch (err) {
+            setError("Error deleting files");
+        } finally {
+            setTimeout(() => setDeleteStatus(''), 3000);
+        }
+    };
+
     const groupFilesByBaseName = (files) => {
         const groups = {};
         files.forEach(file => {
-            // Extraire le nom de base (avant l'underscore et sans l'extension)
-            const baseName = file.name.split('_')[0].split('.')[0];
-            if (!groups[baseName]) {
-                groups[baseName] = [];
+            // Le répertoire est le premier niveau de regroupement
+            const dirName = file.path.split('/')[0];
+            if (!groups[dirName]) {
+                groups[dirName] = {
+                    files: [],
+                    baseName: file.name.split('_')[0].split('.')[0]
+                };
             }
-            groups[baseName].push(file);
+            groups[dirName].files.push(file);
         });
         return groups;
     };
@@ -134,20 +161,36 @@ function OCRApp() {
                         {processingStatus || 'Processing... This may take a few minutes.'}
                     </div>
                 )}
+                {deleteStatus && (
+                    <div className="mx-6 p-4 mb-4 text-green-700 bg-green-100 rounded-lg">
+                        {deleteStatus}
+                    </div>
+                )}
 
                 {/* Files List */}
                 <div className="p-6 border-t bg-gray-50">
                     <h2 className="text-lg font-medium text-gray-800 mb-4">Processed Files</h2>
                     <div className="space-y-4">
                         {Object.entries(files).length > 0 ? (
-                            Object.entries(files).map(([baseName, groupFiles]) => (
-                                <div key={baseName} className="bg-white rounded-lg border p-4">
+                            Object.entries(files).map(([dirName, group]) => (
+                                <div key={dirName} className="bg-white rounded-lg border p-4">
                                     <div className="flex flex-col gap-2">
-                                        <div className="font-medium text-gray-700 text-lg mb-2">
-                                            Document: {baseName}
+                                        <div className="flex justify-between items-center mb-2">
+                                            <div className="font-medium text-gray-700 text-lg">
+                                                Document: {group.baseName}
+                                            </div>
+                                            <button
+                                                onClick={() => handleDelete(dirName)}
+                                                className="px-3 py-1 text-sm rounded-md bg-red-50 text-red-600 hover:bg-red-100 flex items-center"
+                                            >
+                                                <svg className="w-4 h-4 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                </svg>
+                                                Delete
+                                            </button>
                                         </div>
                                         <div className="space-y-2">
-                                            {groupFiles.sort((a, b) => a.name.localeCompare(b.name)).map(file => (
+                                            {group.files.sort((a, b) => a.name.localeCompare(b.name)).map(file => (
                                                 <div key={file.name} className="flex items-center justify-between bg-gray-50 p-2 rounded-lg">
                                                     <span className="text-sm text-gray-600">
                                                         {getFileTypeLabel(file.name)}
