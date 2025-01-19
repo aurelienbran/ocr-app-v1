@@ -1,10 +1,8 @@
 [Unit]
 Description=OCR Application Service
 After=network.target
-StartLimitIntervalSec=0
 
 [Service]
-Type=simple
 User=ubuntu
 Group=ubuntu
 WorkingDirectory=/opt/ocr-app/ocr-app-v1
@@ -12,46 +10,19 @@ Environment="PATH=/opt/ocr-app/ocr-app-v1/venv/bin:/usr/bin:/usr/local/bin"
 Environment="PYTHONPATH=/opt/ocr-app/ocr-app-v1"
 EnvironmentFile=/opt/ocr-app/ocr-app-v1/.env
 
-# Commande de démarrage avec options de mémoire pour uvicorn
-ExecStart=/opt/ocr-app/ocr-app-v1/venv/bin/uvicorn app.main:app \
-    --host 0.0.0.0 \
-    --port 8000 \
-    --workers 1 \
-    --limit-concurrency 5 \
-    --timeout-keep-alive 5 \
-    --no-access-log
+# Commande de démarrage
+ExecStart=/opt/ocr-app/ocr-app-v1/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 # Configuration mémoire
-MemoryMax=4G
-MemoryHigh=3G
+MemoryMax=8G
+MemoryHigh=6G
 MemorySwapMax=0
-TasksMax=100
+TasksMax=4096
 
-# Configuration OOM
-OOMScoreAdjust=-100
-OOMPolicy=stop
-
-# Gestion redémarrage optimisée
-Restart=always
-RestartSec=5
-StartLimitBurst=3
-StartLimitIntervalSec=60
-
-# Limites système
-LimitNOFILE=65535
-LimitNPROC=100
-TimeoutStartSec=30
-TimeoutStopSec=30
-
-# Nettoyage
+# Configuration des fichiers temporaires
 RuntimeDirectory=ocr-app
 RuntimeDirectoryMode=0755
-PrivateTmp=true
-
-# Logging
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=ocr-app
+ReadWritePaths=/tmp /var/tmp
 
 [Install]
 WantedBy=multi-user.target
