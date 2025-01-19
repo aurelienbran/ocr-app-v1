@@ -135,6 +135,9 @@ async def log_requests(request: Request, call_next):
         logger.error(f"Error processing request: {str(e)}")
         raise
 
+# Monter les fichiers statiques avant la route par défaut
+app.mount("/static", StaticFiles(directory="app/static"), name="static")
+
 # Route par défaut pour servir l'interface
 @app.get("/")
 async def read_root():
@@ -142,10 +145,6 @@ async def read_root():
 
 # Inclure les routes API
 app.include_router(router)
-
-# Monter les fichiers statiques
-app.mount("/static", StaticFiles(directory="app/static"), name="static")
-app.mount("/js", StaticFiles(directory="app/static/js"), name="js")
 
 # Configuration Uvicorn optimisée
 config = {
