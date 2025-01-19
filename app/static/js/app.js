@@ -16,7 +16,7 @@ function OCRApp() {
             const response = await fetch('/files');
             const data = await response.json();
             const groupedFiles = groupFilesByBaseName(data);
-            setFiles(Object.entries(groupedFiles));
+            setFiles(groupedFiles);
         } catch (err) {
             setError("Error loading files");
         }
@@ -61,12 +61,13 @@ function OCRApp() {
 
     const groupFilesByBaseName = (files) => {
         const groups = {};
-        files.forEach(fileName => {
-            const baseName = fileName.split('_')[0];
+        files.forEach(file => {
+            // Extraire le nom de base (avant l'underscore et sans l'extension)
+            const baseName = file.name.split('_')[0].split('.')[0];
             if (!groups[baseName]) {
                 groups[baseName] = [];
             }
-            groups[baseName].push(fileName);
+            groups[baseName].push(file);
         });
         return groups;
     };
@@ -76,6 +77,18 @@ function OCRApp() {
         if (fileName.endsWith('_text.txt')) return 'Text Content';
         if (fileName.endsWith('_summary.txt')) return 'Summary';
         return fileName;
+    };
+
+    const formatFileSize = (bytes) => {
+        if (bytes === 0) return '0 B';
+        const k = 1024;
+        const sizes = ['B', 'KB', 'MB', 'GB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return `${parseFloat((bytes / Math.pow(k, i)).toFixed(2))} ${sizes[i]}`;
+    };
+
+    const downloadFile = (filePath) => {
+        window.location.href = `/download/${filePath}`;
     };
 
     return (
@@ -126,25 +139,34 @@ function OCRApp() {
                 <div className="p-6 border-t bg-gray-50">
                     <h2 className="text-lg font-medium text-gray-800 mb-4">Processed Files</h2>
                     <div className="space-y-4">
-                        {files.length > 0 ? (
-                            files.map(([baseName, groupFiles]) => (
+                        {Object.entries(files).length > 0 ? (
+                            Object.entries(files).map(([baseName, groupFiles]) => (
                                 <div key={baseName} className="bg-white rounded-lg border p-4">
                                     <div className="flex flex-col gap-2">
-                                        <div className="font-medium text-gray-700 text-lg mb-2">{baseName}</div>
-                                        <div className="flex flex-wrap gap-2">
-                                            {groupFiles.sort().map(fileName => (
-                                                <a
-                                                    key={fileName}
-                                                    href={`/files/${fileName}`}
-                                                    className="inline-flex items-center px-3 py-1 text-sm rounded-md bg-blue-50 text-blue-600 hover:bg-blue-100"
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                >
-                                                    <svg className="w-4 h-4 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                                                    </svg>
-                                                    {getFileTypeLabel(fileName)}
-                                                </a>
+                                        <div className="font-medium text-gray-700 text-lg mb-2">
+                                            Document: {baseName}
+                                        </div>
+                                        <div className="space-y-2">
+                                            {groupFiles.sort((a, b) => a.name.localeCompare(b.name)).map(file => (
+                                                <div key={file.name} className="flex items-center justify-between bg-gray-50 p-2 rounded-lg">
+                                                    <span className="text-sm text-gray-600">
+                                                        {getFileTypeLabel(file.name)}
+                                                    </span>
+                                                    <div className="flex items-center gap-4">
+                                                        <span className="text-xs text-gray-500">
+                                                            {formatFileSize(file.size)}
+                                                        </span>
+                                                        <button
+                                                            onClick={() => downloadFile(file.path)}
+                                                            className="inline-flex items-center px-3 py-1 text-sm rounded-md bg-blue-50 text-blue-600 hover:bg-blue-100"
+                                                        >
+                                                            <svg className="w-4 h-4 mr-1" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                                                            </svg>
+                                                            Download
+                                                        </button>
+                                                    </div>
+                                                </div>
                                             ))}
                                         </div>
                                     </div>
