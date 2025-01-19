@@ -8,13 +8,11 @@ import traceback
 import time
 import tempfile
 import os
-import psutil
 import gc
 
 class VisionService:
     def __init__(self, credentials=None):
         try:
-            # Configuration de l'endpoint régional
             client_options = {"api_endpoint": "eu-vision.googleapis.com"}
             self.client = vision_v1.ImageAnnotatorClient(
                 client_options=client_options,
@@ -25,52 +23,33 @@ class VisionService:
             logger.error(f"Failed to initialize Vision AI client: {str(e)}\n{traceback.format_exc()}")
             raise
 
-    def _log_memory_metrics(self, stage: str):
-        """Log detailed memory metrics at different processing stages"""
-        try:
-            process = psutil.Process(os.getpid())
-            memory_info = process.memory_info()
-            logger.info(
-                f"Memory metrics at {stage}:\n"
-                f"  RSS: {memory_info.rss/1024/1024:.1f}MB\n"
-                f"  VMS: {memory_info.vms/1024/1024:.1f}MB\n"
-                f"  Percent: {process.memory_percent():.1f}%"
-            )
-        except Exception as e:
-            logger.warning(f"Failed to log memory metrics: {str(e)}")
-
     async def analyze_document(self, content: bytes, filename: str) -> Dict[str, Any]:
         start_time = time.time()
         temp_dir = None
         
         try:
-            self._log_memory_metrics("start_analysis")
-            
-            # Convert PDF if necessary
             if filename.lower().endswith('.pdf'):
                 logger.info(f"Starting PDF conversion for Vision AI: {filename}")
                 logger.info(f"Input PDF size: {len(content)/1024/1024:.1f}MB")
                 
                 try:
-                    # Create temporary directory for conversion
+                    # Utiliser un dossier temporaire pour la conversion
                     temp_dir = tempfile.mkdtemp(prefix="ocr_")
                     logger.info(f"Created temporary directory: {temp_dir}")
                     
-                    self._log_memory_metrics("before_conversion")
-                    
-                    # Convert with optimized parameters
+                    # Convertir avec des paramètres optimisés
                     images = convert_from_bytes(
                         content,
                         output_folder=temp_dir,
                         fmt="png",
-                        dpi=200,  # Lower DPI but sufficient for OCR
-                        thread_count=1,  # Limit CPU usage
-                        use_pdftocairo=True,  # More memory efficient
-                        grayscale=True,  # Reduce memory usage
-                        size=(1600, None),  # Limit max width
-                        paths_only=True,  # Return paths instead of loading images
+                        dpi=200,  # Résolution réduite mais suffisante pour OCR
+                        thread_count=1,  # Limite l'utilisation CPU
+                        use_pdftocairo=True,  # Plus efficace que pdftoppm
+                        grayscale=True,  # Réduit l'utilisation mémoire
+                        size=(1600, None),  # Limite la largeur max
+                        paths_only=True,  # Retourne les chemins au lieu de charger les images
                         first_page=1,
-                        last_page=1  # Only convert first page
+                        last_page=1  # Ne convertir que la première page
                     )
                     
                     if not images:
@@ -78,18 +57,17 @@ class VisionService:
                     
                     logger.info("PDF conversion successful")
                     
-                    # Read the converted image
+                    # Lire l'image convertie
                     with open(images[0], 'rb') as img_file:
                         image_content = img_file.read()
-                        
-                    logger.info(f"Converted image size: {len(image_content)/1024/1024:.1f}MB")
-                    self._log_memory_metrics("after_conversion")
                     
+                    logger.info(f"Converted image size: {len(image_content)/1024/1024:.1f}MB")
+                
                 except Exception as e:
                     logger.error(f"PDF conversion failed: {str(e)}\n{traceback.format_exc()}")
                     raise
                 finally:
-                    # Cleanup temporary directory
+                    # Nettoyer le dossier temporaire
                     if temp_dir and os.path.exists(temp_dir):
                         try:
                             for file in os.listdir(temp_dir):
@@ -101,7 +79,7 @@ class VisionService:
             else:
                 image_content = content
 
-            # Configure features
+            # Configuration des features
             logger.info("Configuring Vision AI features")
             features = [
                 vision_v1.Feature(type_=vision_v1.Feature.Type.DOCUMENT_TEXT_DETECTION),
@@ -109,11 +87,10 @@ class VisionService:
                 vision_v1.Feature(type_=vision_v1.Feature.Type.TEXT_DETECTION)
             ]
 
-            # Force garbage collection before Vision AI processing
+            # Forcer le garbage collection avant le traitement Vision AI
             gc.collect()
-            self._log_memory_metrics("before_vision_ai")
 
-            # Create request
+            # Créer la requête
             logger.info("Creating Vision AI request")
             image = vision_v1.Image(content=image_content)
             request = vision_v1.AnnotateImageRequest(
@@ -121,7 +98,7 @@ class VisionService:
                 features=features
             )
 
-            # Process asynchronously
+            # Traitement asynchrone
             logger.info("Sending request to Vision AI")
             response = await asyncio.to_thread(
                 self.client.annotate_image,
@@ -129,7 +106,7 @@ class VisionService:
             )
             logger.info("Received Vision AI response")
 
-            # Process response
+            # Traiter la réponse
             result = {
                 'text': '',
                 'labels': [],
@@ -140,7 +117,7 @@ class VisionService:
                 }
             }
 
-            # Extract document text if available
+            # Extraire le texte si disponible
             if response.full_text_annotation:
                 logger.info("Processing text annotations")
                 result['text'] = response.full_text_annotation.text
@@ -151,26 +128,25 @@ class VisionService:
                     result['metadata']['confidence'] = response.full_text_annotation.pages[0].confidence
                     logger.info(f"Text detection confidence: {result['metadata']['confidence']:.2%}")
                 
-                # Try to detect document type from labels
+                # Détecter le type de document depuis les labels
                 for label in response.label_annotations:
                     result['labels'].append({
                         'description': label.description,
                         'score': label.score,
                         'topicality': label.topicality
                     })
-                    if label.score > 0.8:  # High confidence label
+                    if label.score > 0.8:  # Label avec haute confiance
                         if any(keyword in label.description.lower() for keyword in 
                               ['schematic', 'diagram', 'technical', 'drawing']):
                             result['metadata']['document_type'] = 'technical_drawing'
 
-            # Detect language if available
+            # Détecter la langue si disponible
             if response.text_annotations and response.text_annotations[0].locale:
                 result['metadata']['language'] = response.text_annotations[0].locale
                 logger.info(f"Detected language: {result['metadata']['language']}")
 
-            # Final memory cleanup and metrics
+            # Nettoyage final et métriques
             gc.collect()
-            self._log_memory_metrics("end_analysis")
             
             processing_time = time.time() - start_time
             logger.info(f"Vision AI processing completed in {processing_time:.2f} seconds")
